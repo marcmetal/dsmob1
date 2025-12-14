@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Mobile Radioactive Sphere</title>
+    <style>
+        html,body{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:#020308;touch-action:none;position:fixed;-webkit-user-select:none;-webkit-touch-callout:none}
+        #cv{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;background:#020308}
+        #reset{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);background:rgba(0,255,170,.2);color:#00ffaa;border:1px solid #00ffaa;padding:12px 20px;border-radius:5px;font-size:16px;z-index:2;touch-action:auto}
+    </style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<button id="reset">RESET</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const cv=document.getElementById('cv'),dpr=devicePixelRatio;
+function setSize(){
+    cv.width=innerWidth*dpr; cv.height=innerHeight*dpr;
+    cv.style.width=innerWidth+'px'; cv.style.height=innerHeight+'px';
+}
+setSize(); addEventListener('resize',setSize);
+
+const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,.1,1000);
+const renderer=new THREE.WebGLRenderer({canvas:cv,antialias:true}); renderer.setSize(innerWidth,innerHeight,false); camera.position.z=25;
+
+const group=new THREE.Group(); group.rotation.x=Math.PI/8; scene.add(group);
+
+const starGeo=new THREE.BufferGeometry(),starPos=new Float32Array(15000*3);
+for(let i=0;i<15000*3;i++)starPos[i]=(Math.random()-.5)*1600;
+starGeo.setAttribute('position',new THREE.BufferAttribute(starPos,3));
+group.add(new THREE.Points(starGeo,new THREE.PointsMaterial({color:0xffffff,size:2,transparent:true,opacity:.8})));
+
+const core=new THREE.Mesh(new THREE.SphereGeometry(5,64,64),new THREE.MeshStandardMaterial({color:0x0a0f0f,metalness:.95,roughness:.15,emissive:0x051010,emissiveIntensity:.4}));
+group.add(core);
+
+const rings=[{ir:7.5,or:10,c:0xff6600,o:.9},{ir:11,or:14,c:0x00ffff,o:.7},{ir:15,or:20,c:0xff00ff,o:.5}];
+const ringMeshes=[];
+rings.forEach((r,idx)=>{
+    const ring=new THREE.Mesh(new THREE.RingGeometry(r.ir,r.or,128),new THREE.MeshBasicMaterial({color:r.c,side:THREE.DoubleSide,transparent:true,opacity:r.o,blending:THREE.AdditiveBlending,depthWrite:false}));
+    ring.rotation.x=Math.PI/2; ring.userData.base=r.o; group.add(ring); ringMeshes.push(ring);
+});
+
+const smallGeo=new THREE.SphereGeometry(.38,20,20),small=[];
+const poles=[];
+for(let i=0;i<300;i++){
+    const phi=Math.acos(1-2*(i+.5)/300),theta=Math.PI*(1+Math.sqrt(5))*(i+.5);
+    const dir=new THREE.Vector3(Math.sin(phi)*Math.cos(theta),Math.sin(phi)*Math.sin(theta),Math.cos(phi));
+    const pos=dir.clone().multiplyScalar(5-.15);
+    const hue=.72+.05*Math.sin(i/300*Math.PI*3);
+    const mat=new THREE.MeshPhongMaterial({color:new THREE.Color().setHSL(hue,.7,.6),emissive:new THREE.Color().setHSL(hue,.6,.3),shininess:80});
+    const sp=new THREE.Mesh(smallGeo,mat); sp.position.copy(pos);
+    sp.userData={dir:dir.clone(),pos:pos.clone(),offs:new THREE.Vector3(),vel:new THREE.Vector3(),origColor:mat.color.clone(),origEmissive:mat.emissive.clone(),hue:hue};
+    group.add(sp); small.push(sp);
+    let best=-1,max=-Infinity;
+    const axes=[new THREE.Vector3(1,0,0),new THREE.Vector3(-1,0,0),new THREE.Vector3(0,1,0),new THREE.Vector3(0,-1,0),new THREE.Vector3(0,0,1),new THREE.Vector3(0,0,-1)];
+    for(let j=0;j<6;j++){const d=dir.dot(axes[j]); if(d>max){max=d;best=j;} }
+    if(poles.length<6&&!poles.includes(i))poles.push(i);
+}
+
+const MAX_PART=8000;
+const pGeo=new THREE.BufferGeometry();
+const pPos=new Float32Array(MAX_PART*3),pVel=new Float32Array(MAX_PART*3),pLife=new Float32Array(MAX_PART);
+pGeo.setAttribute('position',new THREE.BufferAttribute(pPos,3).setUsage(THREE.DynamicDrawUsage));
+const particles=new THREE.Points(pGeo,new THREE.PointsMaterial({size:.4,vertexColors:true,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending}));
+group.add(particles); let pIndex=0;
+
+scene.add(new THREE.AmbientLight(0x0a1a1a,.3));
+const ptLight=new THREE.PointLight(0x5e00ff,4,60); scene.add(ptLight);
+
+let zoom=25,rotX=group.rotation.x,rotY=0,rotVelX=0,rotVelY=0,emitting=false;
+const touches=new Map(); let pinch=false,startDist=0,startZoom=zoom;
+function count(){return touches.size;}
+function dist(){const [a,b]=[...touches.values()]; return Math.hypot(a.x-b.x,a.y-b.y);}
+
+function down(e){
+    if(e.pointerType!=='touch')return;
+    touches.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(count()===1){emitting=true;pinch=false;}
+    if(count()===2){emitting=false;pinch=true;startDist=dist();startZoom=zoom;}
+}
+function move(e){
+    if(!touches.has(e.pointerId))return;
+    const old=touches.get(e.pointerId);
+    const dx=e.clientX-old.x,dy=e.clientY-old.y;
+    const d=Math.hypot(dx,dy);
+    if(d<6)return; // ignore finger-together noise
+    touches.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(count()===1&&!pinch){rotVelY+=dx*.008; rotVelX+=dy*.008;}
+    if(count()===2&&pinch){zoom=startZoom+(startDist-d)*.5; zoom=Math.max(5,Math.min(300,zoom));}
+}
+function up(e){
+    touches.delete(e.pointerId);
+    if(count()===0){emitting=false;pinch=false;startDist=0;startZoom=zoom;}
+}
+
+cv.addEventListener('pointerdown',down);
+cv.addEventListener('pointermove',move);
+cv.addEventListener('pointerup',up);
+cv.addEventListener('pointercancel',up);
+
+document.getElementById('reset').onclick=()=>{
+    zoom=25; rotX=Math.PI/8; rotY=0; rotVelX=0; rotVelY=0;
+    group.rotation.set(rotX,0,0);
+    small.forEach(s=>{
+        s.position.copy(s.userData.pos); s.userData.offs.set(0,0,0); s.userData.vel.set(0,0,0);
+        s.material.color.copy(s.userData.origColor); s.material.emissive.copy(s.userData.origEmissive);
+    });
+    for(let i=0;i<MAX_PART;i++)pLife[i]=0;
+};
+
+let last=performance.now();
+function frame(now){
+    const dt=Math.min((now-last)*.001,.033); last=now;
+    camera.position.z+=(zoom-camera.position.z)*.1;
+    rotVelX*=0.99; rotVelY*=0.99; rotX+=rotVelX; rotY+=rotVelY;
+    group.rotation.x=rotX; group.rotation.y=rotY;
+    if(!emitting)rotY+=0.002;
+    if(emitting){
+        for(const i of poles){
+            const sp=small[i],dir=sp.userData.dir.clone().applyEuler(group.rotation);
+            for(let n=0;n<3;n++){
+                const base=sp.position.clone().applyEuler(group.rotation).add(dir.clone().multiplyScalar(2));
+                const spread=.5;
+                const vx=dir.x*30+(Math.random()-.5)*spread;
+                const vy=dir.y*30+(Math.random
